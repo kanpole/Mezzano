@@ -14,8 +14,34 @@
   ((form :initarg :form :reader lazy-eval-function-form)
    (env :initarg :env :reader lazy-eval-function-env)
    (pathname :initarg :pathname :reader lazy-eval-function-pathname)
-   (function :initform nil :accessor lazy-eval-function-function))
+   (tlf :initarg :tlf :reader lazy-eval-function-tlf)
+   (function :initform nil))
   (:metaclass mezzano.clos:funcallable-standard-class))
+
+(defun lazy-eval-function-function (lazy-eval-function)
+  (with-slots (function) lazy-eval-function
+    (or function
+        (let ((new-function
+                (let ((*compile-file-pathname*
+                        (lazy-eval-function-pathname lazy-eval-function))
+                      (mezzano.internals::*top-level-form-number*
+                        (lazy-eval-function-tlf lazy-eval-function)))
+                  (eval-compile (lazy-eval-function-form lazy-eval-function)
+                                (lazy-eval-function-env lazy-eval-function)))))
+          (mezzano.clos:set-funcallable-instance-function
+           lazy-eval-function new-function)
+          (setf function new-function)))))
+
+(defmethod mezzano.internals::funcallable-instance-lambda-expression ((function lazy-eval-function))
+  (function-lambda-expression
+   (lazy-eval-function-function function)))
+
+(defmethod mezzano.internals::funcallable-instance-debug-info ((function lazy-eval-function))
+  (mezzano.internals::function-debug-info
+   (lazy-eval-function-function function)))
+
+(defmethod mezzano.internals::funcallable-instance-compiled-function-p ((function lazy-eval-function))
+  (compiled-function-p (lazy-eval-function-function function)))
 
 (defun eval-compile (form env)
   (let ((mezzano.compiler::*load-time-value-hook* 'mezzano.compiler::eval-load-time-value)
@@ -56,14 +82,7 @@
           (t (eval-one-setq var val env)))))
 
 (defun invoke-lazy-function (instance args)
-  (let ((compiled-function
-          (let ((*compile-file-pathname* (lazy-eval-function-pathname instance)))
-            (eval-compile (lazy-eval-function-form instance)
-                          (lazy-eval-function-env instance)))))
-    (setf (lazy-eval-function-function instance) compiled-function)
-    (mezzano.clos:set-funcallable-instance-function
-     instance compiled-function)
-    (apply compiled-function args)))
+  (apply (lazy-eval-function-function instance) args))
 
 (defun eval-cons (form env)
   (case (first form)
@@ -87,7 +106,8 @@
                                                  :form name
                                                  :env env
                                                  :pathname (or *compile-file-pathname*
-                                                               *load-pathname*))))
+                                                               *load-pathname*)
+                                                 :tlf mezzano.internals::*top-level-form-number*)))
                     (mezzano.clos:set-funcallable-instance-function
                      instance (lambda (&rest args)
                                 (invoke-lazy-function instance args)))
