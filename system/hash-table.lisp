@@ -16,6 +16,8 @@
   (test 'eql :type (member eq eql equal equalp) :read-only t)
   (test-function (error "Unreachable, missing test-function") :type function :read-only t)
   (hash-function (error "Unreachable, missing hash-function") :type function :read-only t)
+  (gethash-fn nil :type (or null function))
+  (puthash-fn nil :type (or null function))
   (%count 0)
   (used 0)
   (rehash-size 1 :type (or (integer 1 *) (float (1.0) *)))
@@ -85,24 +87,21 @@
 (defun hash-table-count (hash-table)
   (hash-table-%count hash-table))
 
+(declaim (inline strong-hash-table-size))
 (defun strong-hash-table-size (hash-table)
-  (ash (%object-header-data (hash-table-storage hash-table)) -1))
+  (the fixnum (ash (the fixnum (%object-header-data (hash-table-storage hash-table))) -1)))
 
 ;; For strong hash-tables only.
+(declaim (inline hash-table-key-at (setf hash-table-key-at)
+                 hash-table-value-at (setf hash-table-value-at)))
 (defun hash-table-key-at (hash-table index)
-  (svref (hash-table-storage hash-table) (* index 2)))
-
-;; For strong hash-tables only.
+  (svref (hash-table-storage hash-table) (the fixnum (ash index 1))))
 (defun (setf hash-table-key-at) (value hash-table index)
-  (setf (svref (hash-table-storage hash-table) (* index 2)) value))
-
-;; For strong hash-tables only.
+  (setf (svref (hash-table-storage hash-table) (the fixnum (ash index 1))) value))
 (defun hash-table-value-at (hash-table index)
-  (svref (hash-table-storage hash-table) (1+ (* index 2))))
-
-;; For strong hash-tables only.
+  (svref (hash-table-storage hash-table) (the fixnum (1+ (the fixnum (ash index 1))))))
 (defun (setf hash-table-value-at) (value hash-table index)
-  (setf (svref (hash-table-storage hash-table) (1+ (* index 2))) value))
+  (setf (svref (hash-table-storage hash-table) (the fixnum (1+ (the fixnum (ash index 1))))) value))
 
 (defun hash-table-test-hash-function (test)
   (ecase test
@@ -141,6 +140,26 @@
                               :weakness weakness)))
     (when synchronized
       (setf (hash-table-lock ht) (mezzano.supervisor:make-mutex ht)))
+    (multiple-value-bind (fast-gethash fast-puthash)
+        (when (not weakness)
+          (case test
+            ((eq) (values #'gethash-standard-eq #'puthash-standard-eq))
+            ((eql) (values #'gethash-standard-eql #'puthash-standard-eql))
+            ((equal) (values #'gethash-standard-equal #'puthash-standard-equal))
+            ((equalp) (values #'gethash-standard-equalp #'puthash-standard-equalp))))
+      (when fast-gethash
+        (setf (hash-table-gethash-fn ht) (if synchronized
+                                             (lambda (key hash-table default)
+                                               (declare (lambda-name fast-gethash-with-lock))
+                                               (with-hash-table-lock (hash-table)
+                                                 (funcall fast-gethash key hash-table default)))
+                                             fast-gethash)
+              (hash-table-puthash-fn ht) (if synchronized
+                                             (lambda (value key hash-table)
+                                               (declare (lambda-name fast-puthash-with-lock))
+                                               (with-hash-table-lock (hash-table)
+                                                 (funcall fast-puthash value key hash-table)))
+                                             fast-puthash))))
     ht))
 
 (defmacro with-hash-table-lock ((hash-table) &body body)
@@ -167,6 +186,12 @@
 
 (defun gethash (key hash-table &optional default)
   (check-type hash-table hash-table)
+  (let ((fast-fn (hash-table-gethash-fn hash-table)))
+    (when fast-fn
+      (return-from gethash
+        (locally
+            (declare (optimize speed (safety 0)))
+          (funcall (the function fast-fn) key hash-table default)))))
   (with-hash-table-lock (hash-table)
     (when (hash-table-weakness hash-table)
       (return (gethash-weak key hash-table default)))
@@ -177,6 +202,12 @@
 
 (defun (setf gethash) (value key hash-table &optional default)
   (check-type hash-table hash-table)
+  (let ((fast-fn (hash-table-puthash-fn hash-table)))
+    (when fast-fn
+      (locally
+          (declare (optimize speed (safety 0)))
+        (funcall (the function fast-fn) value key hash-table))
+      (return-from gethash value)))
   (with-hash-table-lock (hash-table)
     (when (hash-table-weakness hash-table)
       (return (setf (gethash-weak key hash-table default) value)))
@@ -198,6 +229,9 @@
                  (hash-table-rehash-threshold hash-table)))
          ;; There must always be at least one unbound slot in the hash table.
          (hash-table-rehash hash-table t)
+         ;; Since we haven't inserted yet, rehash would have lost the invariantness of
+         ;; the key we're inserting. Do it again to make sure.
+         (hash-table-update-gc-invariant hash-table key)
          (multiple-value-bind (slot free-slot)
              (find-hash-table-slot key hash-table)
            (declare (ignore slot))
@@ -241,6 +275,9 @@
            (return-from gethash default))
          ;; There must always be at least one unbound slot in the hash table.
          (hash-table-rehash hash-table t)
+         ;; Since we haven't inserted yet, rehash would have lost the invariantness of
+         ;; the key we're inserting. Do it again to make sure.
+         (hash-table-update-gc-invariant hash-table key)
          (multiple-value-bind (slot free-slot)
              (find-hash-table-slot key hash-table)
            (declare (ignore slot))
@@ -291,7 +328,7 @@
 
 (defun find-hash-table-slot-1 (key hash-table)
   (do* ((free-slot nil)
-        (hash (funcall (hash-table-hash-function hash-table) key))
+        (hash (logand #xffffffff (funcall (hash-table-hash-function hash-table) key)))
         (size (strong-hash-table-size hash-table))
         (test (hash-table-test-function hash-table))
         (storage (hash-table-storage hash-table))
@@ -362,6 +399,104 @@ is below the rehash-threshold."
             (setf (hash-table-key-at hash-table free-slot) key
                   (hash-table-value-at hash-table free-slot) value)))))))
 
+(defmacro define-optimized-hash-table-functions
+    (name test-fn hash-fn)
+  (let ((gethash (intern (format nil "GETHASH-~A" name) (symbol-package name)))
+        (puthash (intern (format nil "PUTHASH-~A" name) (symbol-package name)))
+        (find-hash-table-slot (intern (format nil "%FIND-HASH-TABLE-SLOT-~A" name) (symbol-package name)))
+        (find-hash-table-slot-1 (intern (format nil "%FIND-HASH-TABLE-SLOT-1-~A" name) (symbol-package name))))
+    `(progn
+       (defun ,gethash (key hash-table default)
+         (let ((slot (,find-hash-table-slot key hash-table)))
+           (if slot
+               (values (hash-table-value-at hash-table slot) t)
+               (values default nil))))
+       (defun ,puthash (value key hash-table)
+         (multiple-value-bind (slot free-slot)
+             (,find-hash-table-slot key hash-table)
+           ;; Finding the slot can cause a rehash, which can reset the invariant state.
+           ;; So update the invariant state *after* finding it, to avoid the update getting lost.
+           ;; This can occur if this is the first key being put in an a hash table that
+           ;; was created in an older GC epoch.
+           (hash-table-update-gc-invariant hash-table key)
+           (cond
+             (slot
+              ;; Replacing an existing entry
+              (setf (hash-table-value-at hash-table slot) value))
+             ;; Adding a new entry.
+             ((or (and (eq (hash-table-key-at hash-table free-slot) *hash-table-unbound-value*)
+                       (= (1+ (hash-table-used hash-table)) (strong-hash-table-size hash-table)))
+                  (>= (/ (float (hash-table-%count hash-table)) (float (strong-hash-table-size hash-table)))
+                      (hash-table-rehash-threshold hash-table)))
+              ;; There must always be at least one unbound slot in the hash table.
+              (hash-table-rehash hash-table t)
+              ;; Since we haven't inserted yet, rehash would have lost the invariantness of
+              ;; the key we're inserting. Do it again to make sure.
+              (hash-table-update-gc-invariant hash-table key)
+              (multiple-value-bind (slot free-slot)
+                  (,find-hash-table-slot key hash-table)
+                (declare (ignore slot))
+                (when (and (eq (hash-table-key-at hash-table free-slot) *hash-table-unbound-value*)
+                           (= (1+ (hash-table-used hash-table)) (strong-hash-table-size hash-table)))
+                  ;; Can't happen. Resizing the hash-table adds new slots.
+                  (error "Impossible!"))
+                (unless (eql (hash-table-key-at hash-table free-slot) *hash-table-tombstone*)
+                  (incf (hash-table-used hash-table)))
+                (incf (hash-table-%count hash-table))
+                (setf (hash-table-key-at hash-table free-slot) key
+                      (hash-table-value-at hash-table free-slot) value)))
+             ;; No rehash/resize needed. Insert directly.
+             (t (unless (eql (hash-table-key-at hash-table free-slot) *hash-table-tombstone*)
+                  (incf (hash-table-used hash-table)))
+                (incf (hash-table-%count hash-table))
+                (setf (hash-table-key-at hash-table free-slot) key
+                      (hash-table-value-at hash-table free-slot) value)))))
+       (defun ,find-hash-table-slot-1 (key hash-table)
+         (declare (optimize speed (safety 0) (debug 1))
+                  (type hash-table hash-table))
+         (do* ((free-slot nil)
+               (hash (logand #xffffffff (,hash-fn key)))
+               (size (strong-hash-table-size hash-table))
+               (storage (hash-table-storage hash-table))
+               (unbound-marker *hash-table-unbound-value*)
+               (tombstone *hash-table-tombstone*)
+               ;; This hash implementation is inspired by the Python dict implementation.
+               (slot (logand hash #xffffffff) (logand #xffffffff (the fixnum (+ (the fixnum (+ (the fixnum (* slot 5)) perturb)) 1))))
+               (perturb hash (the fixnum (ash perturb -5))))
+              (nil)
+           (declare (type fixnum hash size slot perturb)
+                    (type simple-vector storage))
+           (let* ((offset (logand slot (the fixnum (1- size)))) ; size is always a power-of-2
+                  (slot-key (aref storage (the fixnum (ash offset 1))))) ; hash-table-key-at
+             (declare (type fixnum offset))
+             (when (and (null free-slot)
+                        (or (eq slot-key unbound-marker)
+                            (eq slot-key tombstone)))
+               (setf free-slot offset))
+             (when (eq slot-key unbound-marker)
+               ;; Unbound value marks the end of this run.
+               (return (values nil free-slot)))
+             (when (,test-fn key slot-key)
+               (return (values offset free-slot))))))
+       (defun ,find-hash-table-slot (key hash-table)
+         "Locate the slot matching KEY. Returns NIL if KEY is not in HASH-TABLE.
+The second return value is the first available/empty slot in the hash-table for KEY.
+Requires at least one completely unbound slot to terminate."
+         (loop
+           (let ((epoch *gc-epoch*))
+             (multiple-value-bind (offset free-slot)
+                 (,find-hash-table-slot-1 key hash-table)
+               (when (or (hash-table-gc-invariant hash-table)
+                         (and (eql epoch *gc-epoch*)
+                              (eql (hash-table-storage-epoch hash-table) *gc-epoch*)))
+                 (return (values offset free-slot)))
+               (hash-table-rehash hash-table nil))))))))
+
+(define-optimized-hash-table-functions standard-eq eq eq-hash)
+(define-optimized-hash-table-functions standard-eql eql eql-hash)
+(define-optimized-hash-table-functions standard-equal equal sxhash)
+(define-optimized-hash-table-functions standard-equalp equalp equalp-hash)
+
 (defstruct (hash-table-iterator
              (:constructor %make-hash-table-iterator))
   storage
@@ -415,6 +550,7 @@ is below the rehash-threshold."
         (unless more (return nil))
         (funcall function key value)))))
 
+(declaim (inline eq-hash))
 (defun eq-hash (object)
   (lisp-object-address object))
 
@@ -609,7 +745,7 @@ is below the rehash-threshold."
 
 (defun find-weak-hash-table-slot-1 (key hash-table)
   (do* ((free-slot nil)
-        (hash (funcall (hash-table-hash-function hash-table) key))
+        (hash (logand #xffffffff (funcall (hash-table-hash-function hash-table) key)))
         (size (hash-table-size hash-table))
         (test (hash-table-test hash-table))
         (storage (hash-table-storage hash-table))
