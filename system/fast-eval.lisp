@@ -54,6 +54,15 @@
 (defmethod mezzano.internals::funcallable-instance-compiled-function-p ((function lazy-eval-function))
   t)
 
+(defmethod mezzano.debug:function-lambda-list ((function lazy-eval-function))
+  (mezzano.debug:function-lambda-list
+   (lazy-eval-function-function function)))
+
+(defmethod mezzano.debug:function-source-location ((function lazy-eval-function) &key offset)
+  (mezzano.debug:function-source-location
+   (lazy-eval-function-function function)
+   :offset offset))
+
 (defun eval-compile (form env)
   (let ((mezzano.compiler::*load-time-value-hook* 'mezzano.compiler::eval-load-time-value)
         (*compile-file-pathname* (or *compile-file-pathname*
