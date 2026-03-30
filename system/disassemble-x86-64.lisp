@@ -32,7 +32,7 @@
                           (eql (ea-disp (first (inst-operands instruction))) (- sys.int::+tag-object+))
                           (integerp (second (inst-operands instruction)))))
              ;; Probably a type check.
-             (let ((type-tag (type-tag-to-name (second (inst-operands instruction)))))
+             (let ((type-tag (dis:type-tag-to-name (second (inst-operands instruction)))))
                (when type-tag
                  (push type-tag annotations))))
            (dolist (operand (inst-operands instruction))
