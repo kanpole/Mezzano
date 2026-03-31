@@ -385,7 +385,7 @@ is below the rehash-threshold."
       (let ((key (svref old-storage (* i 2)))
             (value (svref old-storage (1+ (* i 2)))))
         (unless (or (eq key *hash-table-unbound-value*)
-                    (eq value *hash-table-tombstone*))
+                    (eq key *hash-table-tombstone*))
           (when (and (hash-table-gc-invariant hash-table)
                      (not (object-hash-gc-invariant-under-test key (hash-table-test hash-table))))
             ;; Hash table is no longer invariant.
