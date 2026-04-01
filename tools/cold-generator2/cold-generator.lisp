@@ -498,6 +498,10 @@
                      (env:translate-symbol environment 'sys.int::layout))))
   (configure-system-for-target environment (env:environment-target environment))
   (clos:configure-clos environment #'load-source-file)
+  (when (equal (uiop:getenv "CI") "true")
+    (format t ";; ** CI environment detected **~%")
+    (setf (env:cross-symbol-value environment 'sys.int::*running-in-ci*)
+          't))
   (values))
 
 (defun finalize-system (environment)

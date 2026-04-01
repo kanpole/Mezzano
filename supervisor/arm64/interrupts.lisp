@@ -181,6 +181,7 @@
                 ;; Set the dirty bit and make the page writable again.
                 #+(or)
                 (debug-print-line "Dirty emulation for address " fault-addr)
+                ;; FIXME: This needs to be a CAS
                 (setf (page-table-entry pte) (logior (page-table-entry pte)
                                                      +arm64-tte-dirty+))
                 (setf (ldb +arm64-tte-ap+ (page-table-entry pte))

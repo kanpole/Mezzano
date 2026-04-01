@@ -617,6 +617,8 @@
            #:stop-profiling
            #:virtualbox-read-event
            #:virtualbox-graphics-update-framebuffer
+           #:running-in-ci-p
+           #:ci-exit
 
            #:platform-irq
            #:irq-attach
