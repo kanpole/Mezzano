@@ -1222,3 +1222,8 @@
    #:weak-alist-assoc
    #:weak-alist-rassoc
    #:weak-alist-value))
+
+(defpackage :mezzano.fast-eval
+  (:export #:eval-in-lexenv
+           #:*lazy-lambda-evaluation*)
+  (:use :cl))

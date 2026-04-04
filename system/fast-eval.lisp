@@ -1,12 +1,8 @@
 ;;;; The fast evaluator, passes most forms to the compiler
 
-(defpackage :mezzano.fast-eval
-  (:export #:eval-in-lexenv)
-  (:use :cl))
-
 (in-package :mezzano.fast-eval)
 
-(defparameter *lazy-lambda-evaluation* t)
+(defparameter *lazy-lambda-evaluation* nil)
 
 ;; Rather than immediately compiling lambda forms, we can defer compilation
 ;; until the form is called, and compile then.
