@@ -101,20 +101,20 @@
 (declaim (inline hash-table-key-at (setf hash-table-key-at)
                  hash-table-value-at (setf hash-table-value-at)))
 (defun hash-table-key-at (hash-table index)
-  (svref (hash-table-storage hash-table) (the fixnum (ash index 1))))
+  (aref (hash-table-storage hash-table) (the fixnum (ash index 1))))
 (defun (setf hash-table-key-at) (value hash-table index)
-  (setf (svref (hash-table-storage hash-table) (the fixnum (ash index 1))) value))
+  (setf (aref (hash-table-storage hash-table) (the fixnum (ash index 1))) value))
 (defun hash-table-value-at (hash-table index)
-  (svref (hash-table-storage hash-table) (the fixnum (1+ (the fixnum (ash index 1))))))
+  (aref (hash-table-storage hash-table) (the fixnum (1+ (the fixnum (ash index 1))))))
 (defun (setf hash-table-value-at) (value hash-table index)
-  (setf (svref (hash-table-storage hash-table) (the fixnum (1+ (the fixnum (ash index 1))))) value))
+  (setf (aref (hash-table-storage hash-table) (the fixnum (1+ (the fixnum (ash index 1))))) value))
 
 (defun weak-hash-table-entry-at (hash-table slot)
-  (svref (hash-table-storage hash-table) slot))
+  (aref (hash-table-storage hash-table) slot))
 
 ;; Value should be either the unbound value, tombstone, or a weak pointer.
 (defun (setf weak-hash-table-entry-at) (value hash-table slot)
-  (setf (svref (hash-table-storage hash-table) slot) value))
+  (setf (aref (hash-table-storage hash-table) slot) value))
 
 (defun set-full-weak-hash-table-entry (hash-table slot key value)
   (setf (weak-hash-table-entry-at hash-table slot)
@@ -260,7 +260,7 @@
   (defun probe-hash-table-slot (weakp storage offset unbound-marker tombstone free-slot test-fn key)
     (if weakp
         `(let* ((offset ,offset)
-                (slot-entry (svref ,storage offset)))
+                (slot-entry (aref ,storage offset)))
            (multiple-value-bind (slot-key livep)
                (if (or (eq slot-entry ,unbound-marker)
                        (eq slot-entry ,tombstone))
@@ -300,15 +300,19 @@
     `(progn
        ;; gethash
        (defun ,gethash (key hash-table default)
+         (declare (optimize speed (safety 0))
+                  (type hash-table hash-table))
          (let ((slot (,find-hash-table-slot key hash-table)))
            (if slot
-               ,(if weakp
-                    `(multiple-value-bind (value livep)
-                         (weak-pointer-value (weak-hash-table-entry-at hash-table slot))
-                       (if livep
-                           (values value t)
-                           (values default nil)))
-                    `(values (hash-table-value-at hash-table slot) t))
+               (locally
+                   (declare (type fixnum slot))
+                 ,(if weakp
+                      `(multiple-value-bind (value livep)
+                           (weak-pointer-value (weak-hash-table-entry-at hash-table slot))
+                         (if livep
+                             (values value t)
+                             (values default nil)))
+                      `(values (hash-table-value-at hash-table slot) t)))
                (values default nil))))
        ;; puthash
        (defun ,puthash (value key hash-table)
@@ -477,15 +481,18 @@
          "Locate the slot matching KEY. Returns NIL if KEY is not in HASH-TABLE.
 The second return value is the first available/empty slot in the hash-table for KEY.
 Requires at least one completely unbound slot to terminate."
-         (loop
-           (let ((epoch *gc-epoch*))
-             (multiple-value-bind (offset free-slot)
-                 (,find-hash-table-slot-1 key hash-table)
-               (when (or (hash-table-gc-invariant hash-table)
-                         (and (eql epoch *gc-epoch*)
-                              (eql (hash-table-storage-epoch hash-table) *gc-epoch*)))
-                 (return (values offset free-slot)))
-               (,hash-table-rehash hash-table nil)))))
+         (declare (optimize speed (safety 0))
+                  (type hash-table hash-table))
+         (if (hash-table-gc-invariant hash-table)
+             (,find-hash-table-slot-1 key hash-table)
+             (loop
+               (let ((epoch *gc-epoch*))
+                 (multiple-value-bind (offset free-slot)
+                     (,find-hash-table-slot-1 key hash-table)
+                   (when (and (eql epoch *gc-epoch*)
+                              (eql (hash-table-storage-epoch hash-table) *gc-epoch*))
+                     (return (values offset free-slot)))
+                   (,hash-table-rehash hash-table nil))))))
        (defun ,hash-table-rehash (hash-table resize-p)
          "Resize and rehash HASH-TABLE so that there are no tombstones the usage
 is below the rehash-threshold."
@@ -511,7 +518,7 @@ is below the rehash-threshold."
                  (hash-table-storage-epoch hash-table) *gc-epoch*)
            (dotimes (i old-size hash-table)
              ,(if weakp
-                  `(let ((entry (svref old-storage i)))
+                  `(let ((entry (aref old-storage i)))
                      (unless (or (eq entry *hash-table-unbound-value*)
                                  (eq entry *hash-table-tombstone*))
                        (multiple-value-bind (key livep)
@@ -528,8 +535,8 @@ is below the rehash-threshold."
                              (incf (hash-table-used hash-table))
                              (incf (hash-table-%count hash-table))
                              (setf (weak-hash-table-entry-at hash-table free-slot) entry))))))
-                  `(let ((key (svref old-storage (* i 2)))
-                         (value (svref old-storage (1+ (* i 2)))))
+                  `(let ((key (aref old-storage (* i 2)))
+                         (value (aref old-storage (1+ (* i 2)))))
                      (unless (or (eq key *hash-table-unbound-value*)
                                  (eq key *hash-table-tombstone*))
                        (when (and (hash-table-gc-invariant hash-table)
@@ -577,7 +584,7 @@ is below the rehash-threshold."
     (if (hash-table-iterator-weakp iterator)
         (do () ((>= (hash-table-iterator-index iterator) size))
           (let* ((index (hash-table-iterator-index iterator))
-                 (entry (svref ht index)))
+                 (entry (aref ht index)))
             ;; Increment the key until a non-unbound/-tombstone key is found.
             (incf (hash-table-iterator-index iterator))
             (unless (or (eq entry *hash-table-unbound-value*)
@@ -588,8 +595,8 @@ is below the rehash-threshold."
                   (return (values t key value)))))))
         (do () ((>= (hash-table-iterator-index iterator) size))
           (let* ((index (hash-table-iterator-index iterator))
-                 (key (svref ht index))
-                 (value (svref ht (1+ index))))
+                 (key (aref ht index))
+                 (value (aref ht (1+ index))))
             ;; Increment the key until a non-unbound/-tombstone key is found.
             (incf (hash-table-iterator-index iterator) 2)
             (unless (or (eq key *hash-table-unbound-value*)
