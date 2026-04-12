@@ -83,6 +83,13 @@ jobs:
           path: MBuild            # -> $GITHUB_WORKSPACE/MBuild
           submodules: recursive
 
+      # Cached mbuild might have some llf files cached.
+      # TODO: Figure out how to do out-of-tree builds.
+      - name: Clean MBuild
+        working-directory: MBuild
+        run: |
+          rm -rf home/.cache/common-lisp/ home/.slime/ home/asdf/build/
+
       - name: make asdf.lisp
         working-directory: MBuild/home/asdf
         run: |
