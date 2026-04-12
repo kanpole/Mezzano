@@ -155,6 +155,30 @@ Drop "profile.txt" in https://www.speedscope.app/ .
 ```
 
 To skip a test:
-```list
+```lisp
 (throw 'rt::*in-test* nil)
+```
+
+## Native cross-assembly
+
+It's possible to cross-assemble and disassemble code for a specific architecture while running on another architecture.
+
+```lisp
+(assemble-lap '((mezzano.lap.x86:nop)
+                (mezzano.lap.x86:movnti64 (:rax) :r13)
+                (mezzano.lap.x86:movnti32 (:rax) :edi)
+                (mezzano.lap.x86:movntdq (:rbx) :xmm1)
+                (mezzano.lap.x86:movntps (:rcx) :xmm2)
+                (mezzano.lap.x86:movntpd (:rdx) :xmm3)
+                (mezzano.lap.x86:nop))
+              nil nil nil :x86-64)
+(disassemble * :architecture :x86-64)
+;; #<Compiled-Function 8001E73D49>:
+;;       8001E73D50: 90                             (NOP)
+;;       8001E73D51: 4C 0F C3 28                    (MOVNTI64 :R13 (:RAX))
+;;       8001E73D55: 0F C3 38                       (MOVNTI32 :EDI (:RAX))
+;;       8001E73D58: 66 0F E7 0B                    (MOVNTDQ (:RBX) :XMM1)
+;;       8001E73D5C: 0F 2B 11                       (MOVNTPS (:RCX) :MM2)
+;;       8001E73D5F: 66 0F 2B 1A                    (MOVNTPD (:RDX) :XMM3)
+;;       8001E73D63: 90                             (NOP)
 ```
