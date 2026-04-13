@@ -312,7 +312,6 @@
              (:area :wired))
   location
   abar
-  irq-handler-function
   (ports (sys.int::make-simple-vector +ahci-maximum-n-ports+ :wired)))
 
 (defstruct (ahci-port
@@ -323,6 +322,9 @@
   received-fis
   command-table
   irq-latch
+  irq-state-buffer
+  (irq-state-read-index 0)
+  (irq-state-write-index 0)
   irq-timeout-timer
   irq-watcher
   atapi-p
@@ -330,6 +332,8 @@
   lba48-capable
   sector-size
   sector-count)
+
+(defconstant +ahci-irq-state-buffer-size+ 16)
 
 (defun ahci-port (ahci port)
   (svref (ahci-ports ahci) port))
@@ -432,6 +436,11 @@
         1)
   (sup:debug-print-line "Port reset complete."))
 
+(defun ahci-set-port-atapi (ahci port atapi-p)
+  (setf (ldb (byte 1 +ahci-PxCMD-ATAPI+)
+             (ahci-port-register ahci port +ahci-register-PxCMD+))
+        (if atapi-p 1 0)))
+
 (defun ahci-issue-packet-command (port-info cdb result-buffer result-len)
   (sup:ensure (ahci-port-atapi-p port-info))
   ;; FIXME: Bounce buffer on non-64-bit capable HBAs
@@ -509,6 +518,7 @@
   (let* ((port-info (ahci-port ahci port))
          (identify-data-phys (+ (ahci-port-command-table port-info) #x100))
          (identify-data (sup::convert-to-pmap-address identify-data-phys)))
+    (ahci-set-port-atapi ahci port t)
     (ahci-setup-buffer ahci port identify-data-phys 512 nil nil)
     (ahci-dump-port-registers ahci port)
     (ahci-run-command ahci port ata:+ata-command-identify-packet+)
@@ -554,6 +564,7 @@
   (let* ((port-info (ahci-port ahci port))
          (identify-data-phys (+ (ahci-port-command-table port-info) #x100))
          (identify-data (sup::convert-to-pmap-address identify-data-phys)))
+    (ahci-set-port-atapi ahci port nil)
     (ahci-setup-buffer ahci port identify-data-phys 512 nil nil)
     (ahci-dump-port-registers ahci port)
     (ahci-run-command ahci port ata:+ata-command-identify+)
@@ -616,6 +627,12 @@
          (ct (+ command-table +ahci-ct-CFIS+)))
     (setf (sup::physical-memref-unsigned-byte-8 ct offset) value)))
 
+(defun ahci-rfis (ahci port offset)
+  "Read an octet from the received D2H Register FIS for PORT."
+  (let* ((received-fis (ahci-port-received-fis (ahci-port ahci port)))
+         (rfis (+ received-fis +ahci-rfis-RFIS+)))
+    (sup::physical-memref-unsigned-byte-8 rfis offset)))
+
 (defun ahci-setup-lba28 (ahci port lba count)
   "Set registers in the FIS for an LBA28 command."
   ;; FIXME: Limit checking LBA & COUNT and if COUNT = MAX, then handle that.
@@ -661,11 +678,44 @@
           (sup::physical-memref-unsigned-byte-32 (+ ct +ahci-ct-PRDT+) +ahci-PRDT-DBAU+) (ldb (byte 32 32) buffer))
     (setf (sup::physical-memref-unsigned-byte-32 (+ ct +ahci-ct-PRDT+) +ahci-PRDT-descriptor-information+) (ash (1- length) +ahci-PRDT-di-DBC-position+))))
 
+(defun ahci-clear-irq-state-buffer (port-info)
+  (sup:without-interrupts
+    (setf (ahci-port-irq-state-read-index port-info)
+          (ahci-port-irq-state-write-index port-info))))
+
+(defun ahci-push-irq-state (port-info state)
+  (let* ((buffer (ahci-port-irq-state-buffer port-info))
+         (write-index (ahci-port-irq-state-write-index port-info))
+         (next-index (if (= write-index (1- +ahci-irq-state-buffer-size+))
+                         0
+                         (1+ write-index))))
+    (setf (svref buffer write-index) state)
+    (when (= next-index (ahci-port-irq-state-read-index port-info))
+      (setf (ahci-port-irq-state-read-index port-info)
+            (if (= (ahci-port-irq-state-read-index port-info)
+                   (1- +ahci-irq-state-buffer-size+))
+                0
+                (1+ (ahci-port-irq-state-read-index port-info)))))
+    (setf (ahci-port-irq-state-write-index port-info) next-index)))
+
+(defun ahci-pop-irq-state (port-info)
+  (let ((state 0)
+        (validp nil))
+    (sup:without-interrupts
+      (let ((read-index (ahci-port-irq-state-read-index port-info))
+            (write-index (ahci-port-irq-state-write-index port-info)))
+        (when (not (= read-index write-index))
+          (setf state (svref (ahci-port-irq-state-buffer port-info) read-index)
+                validp t
+                (ahci-port-irq-state-read-index port-info)
+                (if (= read-index (1- +ahci-irq-state-buffer-size+))
+                    0
+                    (1+ read-index))))))
+    (values state validp)))
+
 (defun ahci-run-command (ahci port command)
   (let* ((port-info (ahci-port ahci port))
-         (irq-latch (ahci-port-irq-latch port-info))
-         (irq-timeout-timer (ahci-port-irq-timeout-timer port-info))
-         (irq-watcher (ahci-port-irq-watcher port-info)))
+         (irq-timeout-timer (ahci-port-irq-timeout-timer port-info)))
     ;; Reset PRDBC, stop it accumulating over commands. I'm not sure how the HBA actually uses this,
     ;; if it keeps track of DMA progress or if it's just for reporting.
     (setf (sup::physical-memref-unsigned-byte-32 (ahci-port-command-list port-info) +ahci-ch-PRDBC+) 0)
@@ -673,17 +723,55 @@
     (setf (ahci-fis ahci port +sata-register-fis-type+) +sata-fis-register-h2d+
           (ahci-fis ahci port +sata-register-command-register-update-field+) (ash 1 +sata-register-command-register-update-bit+)
           (ahci-fis ahci port +sata-register-command+) command)
-    ;; Reset latch before starting the command.
-    (setf (sup:event-state irq-latch) nil)
+    ;; Clear any stale interrupt state before issuing a new command. AHCI's
+    ;; taskfile ERR bit is sticky enough that using it as a completion
+    ;; condition causes later commands to fail spuriously.
+    (let ((state (ahci-port-register ahci port +ahci-register-PxIS+)))
+      (when (not (zerop state))
+        (setf (ahci-port-register ahci port +ahci-register-PxIS+) state)))
+    (when (logbitp port (ahci-global-register ahci +ahci-register-IS+))
+      (setf (ahci-global-register ahci +ahci-register-IS+) (ash 1 port)))
+    (ahci-clear-irq-state-buffer port-info)
     ;; Start command 1.
     (setf (ahci-port-register ahci port +ahci-register-PxCI+) 1)
     ;; Wait for it... Wait for it...
     (sup:timer-arm 30 irq-timeout-timer)
-    (sup:watcher-wait irq-watcher)
-    (when (not (sup:event-state irq-latch))
-      (sup:ensure (sup:timer-expired-p irq-timeout-timer))
-      ;; FIXME: Do something better than this.
-      (sup:debug-print-line "*** AHCI-RUN-COMMAND TIMEOUT EXPIRED! ***"))
+    (loop
+       ;; Success is still determined by hardware command state. Error exit is
+       ;; driven by a new TFES interrupt for this port, not by the sticky TFD
+       ;; ERR bit.
+       (let* ((errorp nil)
+              (pxci (ahci-port-register ahci port +ahci-register-PxCI+))
+              (tfd (ahci-port-register ahci port +ahci-register-PxTFD+))
+              (sts (ldb (byte +ahci-PxTFD-STS-size+ +ahci-PxTFD-STS-position+) tfd)))
+          (loop
+             (multiple-value-bind (state validp)
+                 (ahci-pop-irq-state port-info)
+               (unless validp
+                 (return))
+                (when (logbitp +ahci-PxIS-TFES+ state)
+                  ;; Re-check the live port state before attributing a queued
+                  ;; TFES to the current command. A delayed TFES from the
+                  ;; previous command can arrive after the next command starts.
+                  (let* ((current-pxci (ahci-port-register ahci port +ahci-register-PxCI+))
+                         (current-tfd (ahci-port-register ahci port +ahci-register-PxTFD+))
+                         (current-sts (ldb (byte +ahci-PxTFD-STS-size+ +ahci-PxTFD-STS-position+) current-tfd))
+                         (rfis-status (ahci-rfis ahci port +sata-register-status+)))
+                    (when (or (logtest current-sts ata:+ata-err+)
+                              (and (not (logbitp 0 current-pxci))
+                                   (logtest rfis-status ata:+ata-err+)))
+                      (setf errorp t)))
+                  (return))))
+          (when errorp
+            (return))
+          (when (and (not (logbitp 0 pxci))
+                     (not (or (logtest sts ata:+ata-bsy+)
+                              (logtest sts ata:+ata-drq+))))
+            (return)))
+       (when (sup:timer-expired-p irq-timeout-timer)
+         ;; FIXME: Do something better than this.
+         (sup:debug-print-line "*** AHCI-RUN-COMMAND TIMEOUT EXPIRED! ***")
+         (return)))
     ;; -absolute is non-consing
     (sup:timer-disarm-absolute irq-timeout-timer)))
 
@@ -785,6 +873,7 @@
       ;; Ack interrupts.
       (setf (ahci-port-register ahci port +ahci-register-PxIS+) state)
       ;; Need to do something with error interrupts here as well.
+      (ahci-push-irq-state (ahci-port ahci port) state)
       ;; Wake sleepers.
       (setf (sup:event-state (ahci-port-irq-latch (ahci-port ahci port))) t))))
 
@@ -792,22 +881,21 @@
   (let ((pending (ahci-global-register ahci +ahci-register-IS+))
         (ports (ahci-ports ahci)))
     #+(or)(sup:debug-print-line "AHCI IRQ " pending)
+    (when (zerop pending)
+      (return-from ahci-irq-handler nil))
     (dotimes (i 32)
       (when (and (svref ports i)
                  (logbitp i pending))
         (ahci-port-irq-handler ahci i)))
     ;; And clear any pending interrupts that were handled.
-    (setf (ahci-global-register ahci +ahci-register-IS+) pending)))
+    (setf (ahci-global-register ahci +ahci-register-IS+) pending)
+    t))
 
 (defun pci::ahci-pci-register (location)
   ;; Wired allocation required for the IRQ handler closure.
   (declare (mezzano.compiler::closure-allocation :wired))
   (let ((ahci (make-ahci :location location
                          :abar (pci:pci-io-region location 5))))
-    (setf (ahci-irq-handler-function ahci) (lambda (interrupt-frame irq)
-                                             (declare (ignore interrupt-frame irq))
-                                             (ahci-irq-handler ahci)
-                                             :completed))
     (sup:debug-print-line "Detected AHCI ABAR at " (ahci-abar ahci))
     (sup:debug-print-line "AHCI IRQ is " (pci:pci-intr-line location))
     (ahci-dump-global-registers ahci)
@@ -824,7 +912,11 @@
     ;; Attach interrupt handler.
     (sup:debug-print-line "Handler: " (ahci-irq-handler ahci))
     (sup:irq-attach (sup:platform-irq (pci:pci-intr-line location))
-                    (ahci-irq-handler-function ahci)
+                    (lambda (interrupt-frame irq)
+                      (declare (ignore interrupt-frame irq))
+                      (if (ahci-irq-handler ahci)
+                          :completed
+                          :rejected))
                     ahci)
     ;; Make sure to enable PCI bus mastering for this device.
     (sup:debug-print-line "Config register: " (pci:pci-config/16 location pci:+pci-config-command+))
@@ -843,12 +935,14 @@
       (when (logbitp i (ahci-global-register ahci +ahci-register-PI+))
         (sup:debug-print-line "Port " i)
         (let* ((port (make-ahci-port :ahci ahci :id i))
+               (irq-state-buffer (sys.int::make-simple-vector +ahci-irq-state-buffer-size+ :wired))
                (irq-latch (sup:make-event :name port))
                (irq-timeout-timer (sup:make-timer :name port))
                (irq-watcher (sup:make-watcher :name port)))
           (setf (svref (ahci-ports ahci) i) port)
           ;; Set up a watcher with a timer to deal with timeouts waiting for IRQs
-          (setf (ahci-port-irq-latch port) irq-latch
+          (setf (ahci-port-irq-state-buffer port) irq-state-buffer
+                (ahci-port-irq-latch port) irq-latch
                 (ahci-port-irq-timeout-timer port) irq-timeout-timer
                 (ahci-port-irq-watcher port) irq-watcher)
           (sup:watcher-add-object irq-latch irq-watcher)
