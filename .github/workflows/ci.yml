@@ -23,7 +23,7 @@ jobs:
       matrix:
         include:
           - arch: x86-64
-            timeout: 30
+            timeout: 20
             qemu_bin: qemu-system-x86_64
             qemu_machine: >-
               -enable-kvm
@@ -34,9 +34,9 @@ jobs:
               -device isa-debug-exit,iobase=0xf4,iosize=0x04
             qemu_exit_pass: 3
             qemu_exit_fail: 1
-          # Fails due to some weird miscompilation, maybe due to older sbcl
+          # Works but takes too long without nested virt support, over an hour.
           #- arch: arm64
-          #  timeout: 45
+          #  timeout: 60
           #  qemu_bin: qemu-system-aarch64
           #  qemu_machine: >-
           #    -machine virt
@@ -100,9 +100,16 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             curl \
-            sbcl \
             qemu-system \
             git
+
+      - name: Install SBCL 2.4.8
+        run: |
+          cd /tmp/
+          wget -q https://github.com/sbcl/sbcl/releases/download/sbcl-1.4.14/sbcl-2.4.8-x86-64-linux-binary.tar.bz2
+          tar xf sbcl-2.4.8-x86-64-linux-binary.tar.bz2
+          cd sbcl-2.4.8-x86-64-linux/
+          sudo ./install.sh
 
       - name: Install Quicklisp and dependencies
         run: |
@@ -162,7 +169,6 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Run tests in QEMU
-        timeout-minutes: 30
         run: |
           ${{ matrix.qemu_bin }} \
             -m 2G \
