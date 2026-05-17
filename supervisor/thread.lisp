@@ -506,7 +506,7 @@ Interrupts must be off and the global thread lock must be held."
             (thread-state-r11 thread) 0
             (thread-state-r12 thread) 0
             (thread-state-r13 thread) 0
-            (thread-state-r14 thread) 0
+            (thread-state-r14-value thread) nil
             (thread-state-r15 thread) 0))
     (setf (thread-full-save-p thread) t
           (thread-state thread) :runnable)
@@ -667,7 +667,7 @@ not and WAIT-P is false."
           (thread-state-r11 thread) 0
           (thread-state-r12 thread) 0
           (thread-state-r13 thread) 0
-          (thread-state-r14 thread) 0
+          (thread-state-r14-value thread) nil
           (thread-state-r15 thread) 0))
   ;; Remove the thread from any potential run queue it may be on.
   (when (and (not (eql priority :idle))
