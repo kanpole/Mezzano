@@ -246,6 +246,14 @@
                ;; subtract +tag-object+, skip object header.
                ;; Return an expression, so slot goes through symbol resolution, etc.
                `(+ (- ,sys.int::+tag-object+) 8 (* ,slot 8)))))
+    (:object-location
+     (destructuring-bind (base &optional (slot 0))
+         (rest address)
+       (values :base-plus-immediate
+               base
+               ;; subtract +tag-object+, skip object header.
+               ;; Return an expression, so slot goes through symbol resolution, etc.
+               `(+ (- ,sys.int::+tag-object+) 8 (mezzano.runtime::location-offset ,slot)))))
     (:car
      (destructuring-bind (base)
          (rest address)
