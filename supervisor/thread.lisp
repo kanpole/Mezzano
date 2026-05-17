@@ -53,6 +53,16 @@ This area is made read-only when the soft guard is triggered and
 is used to catch when the thread has left the guard region so that it
 can be reprotected.")
 
+(defstruct (cpu
+            (:area :wired))
+  (tlab-bump 0)
+  (tlab-limit 0)
+  (bytes-consed 0)
+  (cons-allocation-count 0)
+  (cons-fast-path-hits 0)
+  (general-allocation-count 0)
+  (general-fast-path-hits 0))
+
 (defstruct (thread
              (:area :wired)
              (:constructor %make-thread (%name))

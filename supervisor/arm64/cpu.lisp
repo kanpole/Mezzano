@@ -10,6 +10,7 @@
 
 (defstruct (arm64-cpu
             (:area :wired)
+            (:include cpu)
             :slot-locations)
   self
   (state :offline :type (member :offline :online :timed-out))

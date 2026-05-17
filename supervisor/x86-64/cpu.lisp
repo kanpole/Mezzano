@@ -77,9 +77,10 @@
 
 (defconstant +tss-size+ 104)
 
-(defstruct (cpu
-             (:area :wired)
-             :slot-locations)
+(defstruct (x86-64-cpu
+            (:area :wired)
+            (:include cpu)
+            :slot-locations)
   self
   ;; The IDT. 32 bit entries are used here to prevent bignums.
   (idt 0 :fixed-vector 1024 :type (unsigned-byte 32) :align 16)
@@ -138,18 +139,18 @@ The bootloader is loaded to #x7C00, so #x7000 should be safe.")
                         (interrupt-gate-p t))
   "Set an IDT entry in the CPU info vector."
   ;; Be careful and avoid bignums.
-  (setf (cpu-idt cpu (+ (* idt-index 4) 0))
+  (setf (x86-64-cpu-idt cpu (+ (* idt-index 4) 0))
         (logior (ldb (byte 16 0) offset)
                 (ash segment 16)))
-  (setf (cpu-idt cpu (+ (* idt-index 4) 1))
+  (setf (x86-64-cpu-idt cpu (+ (* idt-index 4) 1))
         (logior (or ist 0)
                 (ash (if interrupt-gate-p #b1110 #b1111) 8)
                 (ash dpl 13)
                 (if present (ash 1 15) 0)
                 (ash (ldb (byte 16 16) offset) 16)))
-  (setf (cpu-idt cpu (+ (* idt-index 4) 2))
+  (setf (x86-64-cpu-idt cpu (+ (* idt-index 4) 2))
         (ldb (byte 32 32) offset))
-  (setf (cpu-idt cpu (+ (* idt-index 4) 3))
+  (setf (x86-64-cpu-idt cpu (+ (* idt-index 4) 3))
         0)
   (values))
 
@@ -179,10 +180,10 @@ The bootloader is loaded to #x7C00, so #x7000 should be safe.")
     ;; fouling up behaviour of INCLUDING-SELF.
     (safe-without-interrupts (type vector including-self)
       (dolist (cpu *cpus*)
-        (when (and (eql (cpu-state cpu) :online)
+        (when (and (eql (x86-64-cpu-state cpu) :online)
                    (or including-self
                        (not (eql cpu (local-cpu)))))
-          (send-ipi (cpu-apic-id cpu) type vector))))))
+          (send-ipi (x86-64-cpu-apic-id cpu) type vector))))))
 
 (defun broadcast-wakeup-ipi ()
   (broadcast-ipi +ipi-type-fixed+ +wakeup-ipi-vector+))
@@ -345,19 +346,19 @@ TLB shootdown must be protected by the VM lock."
   "Return the address of the local CPU's info vector."
   (:gc :no-frame :layout #*0)
   (sys.lap-x86:fs)
-  (sys.lap-x86:mov64 :r8 (:object-location nil #.+cpu-self+))
+  (sys.lap-x86:mov64 :r8 (:object-location nil #.+x86-64-cpu-self+))
   (sys.lap-x86:mov32 :ecx #.(ash 1 sys.int::+n-fixnum-bits+))
   (sys.lap-x86:ret))
 
 (defun local-cpu-idle-thread ()
   "Return the idle thread associated with the local CPU."
-  (cpu-idle-thread (local-cpu)))
+  (x86-64-cpu-idle-thread (local-cpu)))
 
 (defun local-cpu-page-fault-hook ()
-  (cpu-page-fault-hook (local-cpu)))
+  (x86-64-cpu-page-fault-hook (local-cpu)))
 
 (defun (setf local-cpu-page-fault-hook) (value)
-  (setf (cpu-page-fault-hook (local-cpu)) value))
+  (setf (x86-64-cpu-page-fault-hook (local-cpu)) value))
 
 (sys.int::define-lap-function %lgdt ((length address))
   "Load a new GDT."
@@ -441,42 +442,42 @@ TLB shootdown must be protected by the VM lock."
 (defun populate-gdt (cpu)
   (let* ((addr (- (sys.int::lisp-object-address cpu)
                   sys.int::+tag-object+))
-         (tss-base (+ addr 8 (mezzano.runtime::location-offset +cpu-tss-reserved-1+))))
+         (tss-base (+ addr 8 (mezzano.runtime::location-offset +x86-64-cpu-tss-reserved-1+))))
     ;; GDT.
-    (setf (cpu-gdt-null cpu) 0 ; NULL seg.
-          (cpu-gdt-cs-r0 cpu) #x00209A0000000000 ; Kernel CS64
+    (setf (x86-64-cpu-gdt-null cpu) 0 ; NULL seg.
+          (x86-64-cpu-gdt-cs-r0 cpu) #x00209A0000000000 ; Kernel CS64
           ;; TSS low.
           ;; Does not fit in a fixnum when treated as a 64-bit value, depending on where the info page
           ;; was allocated. Use 32-bit accesses to work around.
-          (cpu-gdt-tss-w0 cpu) (logior (ldb (byte 16 0) +tss-size+)
-                                       (ash (ldb (byte 16 0) tss-base) 16))
-          (cpu-gdt-tss-w1 cpu) (logior (ldb (byte 8 16) tss-base)
-                                       (ash #x89 8)
-                                       (ash (ldb (byte 4 16) +tss-size+) 16)
-                                       (ash (ldb (byte 8 24) tss-base) 24))
+          (x86-64-cpu-gdt-tss-w0 cpu) (logior (ldb (byte 16 0) +tss-size+)
+                                              (ash (ldb (byte 16 0) tss-base) 16))
+          (x86-64-cpu-gdt-tss-w1 cpu) (logior (ldb (byte 8 16) tss-base)
+                                              (ash #x89 8)
+                                              (ash (ldb (byte 4 16) +tss-size+) 16)
+                                              (ash (ldb (byte 8 24) tss-base) 24))
           ;; TSS high.
-          (cpu-gdt-tss-w2 cpu) (ldb (byte 32 32) tss-base)
-          (cpu-gdt-tss-w3 cpu) 0)))
+          (x86-64-cpu-gdt-tss-w2 cpu) (ldb (byte 32 32) tss-base)
+          (x86-64-cpu-gdt-tss-w3 cpu) 0)))
 
 (defun populate-tss (cpu exception-stack-pointer irq-stack-pointer page-fault-stack-pointer)
   ;; TSS.
   ;; IST1.
-  (setf (cpu-tss-ist cpu (1- +ist-exception-stack+)) exception-stack-pointer)
+  (setf (x86-64-cpu-tss-ist cpu (1- +ist-exception-stack+)) exception-stack-pointer)
   ;; IST2.
-  (setf (cpu-tss-ist cpu (1- +ist-interrupt-stack+)) irq-stack-pointer)
+  (setf (x86-64-cpu-tss-ist cpu (1- +ist-interrupt-stack+)) irq-stack-pointer)
   ;; IST3.
-  (setf (cpu-tss-ist cpu (1- +ist-page-fault-stack+)) page-fault-stack-pointer)
+  (setf (x86-64-cpu-tss-ist cpu (1- +ist-page-fault-stack+)) page-fault-stack-pointer)
   ;; I/O Map Base Address, follows TSS body.
-  (setf (cpu-tss-io-map-base cpu) +tss-size+))
+  (setf (x86-64-cpu-tss-io-map-base cpu) +tss-size+))
 
 (defun populate-cpu-info (cpu wired-stack-pointer exception-stack-pointer irq-stack-pointer page-fault-stack-pointer idle-thread)
   (populate-idt cpu)
   (populate-gdt cpu)
   (populate-tss cpu exception-stack-pointer irq-stack-pointer page-fault-stack-pointer)
   ;; Other stuff.
-  (setf (cpu-self cpu) cpu)
-  (setf (cpu-wired-stack-pointer cpu) wired-stack-pointer)
-  (setf (cpu-idle-thread cpu) idle-thread))
+  (setf (x86-64-cpu-self cpu) cpu)
+  (setf (x86-64-cpu-wired-stack-pointer cpu) wired-stack-pointer)
+  (setf (x86-64-cpu-idle-thread cpu) idle-thread))
 
 (defun initialize-boot-cpu ()
   "Generate GDT, IDT and TSS for the boot CPU."
@@ -491,7 +492,7 @@ TLB shootdown must be protected by the VM lock."
                      (+ (car sys.int::*irq-stack*) (cdr sys.int::*irq-stack*))
                      (+ (car sys.int::*page-fault-stack*) (cdr sys.int::*page-fault-stack*))
                      sys.int::*bsp-idle-thread*)
-  (setf (cpu-state *bsp-cpu*) :online)
+  (setf (x86-64-cpu-state *bsp-cpu*) :online)
   ;; Load various bits.
   (setf (sys.int::msr +msr-ia32-fs-base+)
         (sys.int::lisp-object-address *bsp-cpu*))
@@ -636,7 +637,7 @@ TLB shootdown must be protected by the VM lock."
   (sys.lap-x86:movcr :cr3 :rax)
   ;; Load RSP with the wired stack.
   (sys.lap-x86:fs)
-  (sys.lap-x86:mov64 :rsp (:object-location nil #.+cpu-wired-stack-pointer+))
+  (sys.lap-x86:mov64 :rsp (:object-location nil #.+x86-64-cpu-wired-stack-pointer+))
   ;; And finally, call %%AP-ENTRY-POINT.
   (sys.lap-x86:mov64 :rax (:rbx #.+ap-bootstrap-ap-entry-point-offset+))
   ;; Fake return address
@@ -684,7 +685,7 @@ TLB shootdown must be protected by the VM lock."
   (load-cpu-bits (local-cpu))
   (lapic-setup)
   ;; Signal that this CPU has booted successfully.
-  (let ((old (sys.int::cas (cpu-state (local-cpu)) :offline :online)))
+  (let ((old (sys.int::cas (x86-64-cpu-state (local-cpu)) :offline :online)))
     (when (not (eql old :offline))
       ;; The system decided that this CPU failed to come up for some reason.
       (loop
@@ -806,7 +807,7 @@ TLB shootdown must be protected by the VM lock."
 
 (defun lapic-timer-active ()
   ;; Preemption timers are per-CPU...
-  (cpu-lapic-timer-active (local-cpu)))
+  (x86-64-cpu-lapic-timer-active (local-cpu)))
 
 (defun preemption-timer-reset (time-remaining)
   "Configure the preemption timer to go off after TIME-REMAINING internal time units.
@@ -820,10 +821,10 @@ This is a one-shot timer and must be reset after firing."
       (cond (time-remaining
              (setf (lapic-reg +lapic-reg-timer-initial-count+)
                    (max 1 (lapic-timer-convert-from-internal-time-units time-remaining)))
-             (setf (cpu-lapic-timer-active (local-cpu)) t))
+             (setf (x86-64-cpu-lapic-timer-active (local-cpu)) t))
             (t
              (setf (lapic-reg +lapic-reg-timer-initial-count+) 0)
-             (setf (cpu-lapic-timer-active (local-cpu)) nil)))
+             (setf (x86-64-cpu-lapic-timer-active (local-cpu)) nil)))
       old-remaining)))
 
 (defun preemption-timer-remaining ()
@@ -924,9 +925,9 @@ This is a one-shot timer and must be reset after firing."
   (map-physical-memory-early +ap-trampoline-physical-address+ #x1000 "AP Bootstrap")
   (setf *initial-pml4* (generate-initial-pml4))
   (copy-ap-trampoline #'%%ap-bootstrap '%%ap-entry-point +ap-trampoline-physical-address+ *initial-pml4*)
-  (setf (cpu-page-fault-hook *bsp-cpu*) nil)
-  (setf (cpu-apic-id *bsp-cpu*) (ldb (byte 8 24) (lapic-reg +lapic-reg-id+)))
-  (debug-print-line "BSP has LAPIC ID " (cpu-apic-id *bsp-cpu*))
+  (setf (x86-64-cpu-page-fault-hook *bsp-cpu*) nil)
+  (setf (x86-64-cpu-apic-id *bsp-cpu*) (ldb (byte 8 24) (lapic-reg +lapic-reg-id+)))
+  (debug-print-line "BSP has LAPIC ID " (x86-64-cpu-apic-id *bsp-cpu*))
   (setf *cpus* '())
   (push-wired *bsp-cpu* *cpus*)
   (setf *n-up-cpus* 1)
@@ -942,16 +943,16 @@ This is a one-shot timer and must be reset after firing."
 (defun load-cpu-bits (cpu)
   (let* ((addr (- (sys.int::lisp-object-address cpu)
                   sys.int::+tag-object+)))
-    (%lgdt (1- (* 4 8)) (+ addr 8 (mezzano.runtime::location-offset +cpu-gdt-null+)))
-    (%lidt (1- (* 256 16)) (+ addr 8 (mezzano.runtime::location-offset +cpu-idt+)))
+    (%lgdt (1- (* 4 8)) (+ addr 8 (mezzano.runtime::location-offset +x86-64-cpu-gdt-null+)))
+    (%lidt (1- (* 256 16)) (+ addr 8 (mezzano.runtime::location-offset +x86-64-cpu-idt+)))
     (%ltr 16)
     (%load-cs 8)))
 
 (defun page-fault-idt-entry-flags (cpu)
-  (cpu-idt cpu (+ (* 14 4) 1)))
+  (x86-64-cpu-idt cpu (+ (* 14 4) 1)))
 
 (defun (setf page-fault-idt-entry-flags) (value cpu)
-  (setf (cpu-idt cpu (+ (* 14 4) 1)) value))
+  (setf (x86-64-cpu-idt cpu (+ (* 14 4) 1)) value))
 
 (defun disable-page-fault-ist ()
   (let* ((cpu (local-cpu))
@@ -987,13 +988,13 @@ This is a one-shot timer and must be reset after firing."
          (exception-stack (%allocate-stack (* 128 1024) t))
          (irq-stack (%allocate-stack (* 128 1024) t))
          (page-fault-stack (%allocate-stack (* 128 1024) t))
-         (cpu (make-cpu :state :offline
-                        :apic-id apic-id
-                        :idle-thread idle-thread
-                        :wired-stack wired-stack
-                        :exception-stack exception-stack
-                        :irq-stack irq-stack
-                        :page-fault-stack page-fault-stack)))
+         (cpu (make-x86-64-cpu :state :offline
+                               :apic-id apic-id
+                               :idle-thread idle-thread
+                               :wired-stack wired-stack
+                               :exception-stack exception-stack
+                               :irq-stack irq-stack
+                               :page-fault-stack page-fault-stack)))
     (populate-cpu-info cpu
                        (+ (stack-base wired-stack) (stack-size wired-stack))
                        (+ (stack-base exception-stack) (stack-size exception-stack))
@@ -1004,34 +1005,34 @@ This is a one-shot timer and must be reset after firing."
     (push-wired cpu *cpus*)))
 
 (defun boot-cpu (cpu)
-  (debug-print-line "Booting CPU " cpu "/" (cpu-apic-id cpu))
+  (debug-print-line "Booting CPU " cpu "/" (x86-64-cpu-apic-id cpu))
   (setf (physical-memref-t (+ +ap-trampoline-physical-address+ +ap-bootstrap-cpu-vector-offset+))
         cpu)
   (let ((boot-vector (ash +ap-trampoline-physical-address+ -12)))
-    (send-ipi (cpu-apic-id cpu) +ipi-type-init+ 0)
+    (send-ipi (x86-64-cpu-apic-id cpu) +ipi-type-init+ 0)
     (safe-sleep 0.01) ; 10ms
-    (send-ipi (cpu-apic-id cpu) +ipi-type-sipi+ boot-vector)
+    (send-ipi (x86-64-cpu-apic-id cpu) +ipi-type-sipi+ boot-vector)
     (safe-sleep 0.0002) ; 200μs.
-    (send-ipi (cpu-apic-id cpu) +ipi-type-sipi+ boot-vector)
+    (send-ipi (x86-64-cpu-apic-id cpu) +ipi-type-sipi+ boot-vector)
     (safe-sleep 0.0002))
   ;; Wait for the CPU to come up.
   (let ((start-time (get-internal-run-time)))
     (loop
-       (when (eql (cpu-state cpu) :online)
+       (when (eql (x86-64-cpu-state cpu) :online)
          (return))
        (when (> (- (get-internal-run-time) start-time)
                 (* 5 internal-time-units-per-second))
-         (sys.int::cas (cpu-state cpu) :offline :timed-out)
+         (sys.int::cas (x86-64-cpu-state cpu) :offline :timed-out)
          (return))))
-  (case (cpu-state cpu)
+  (case (x86-64-cpu-state cpu)
     (:online
      (incf *n-up-cpus*)
-     (debug-print-line "CPU " cpu "/" (cpu-apic-id cpu) " booted"))
+     (debug-print-line "CPU " cpu "/" (x86-64-cpu-apic-id cpu) " booted"))
     (t
-     (debug-print-line "CPU " cpu "/" (cpu-apic-id cpu) " timed out"))))
+     (debug-print-line "CPU " cpu "/" (x86-64-cpu-apic-id cpu) " timed out"))))
 
 (defun detect-secondary-cpus ()
-  (let ((bsp-apic-id (cpu-apic-id *bsp-cpu*))
+  (let ((bsp-apic-id (x86-64-cpu-apic-id *bsp-cpu*))
         (madt (acpi-get-table 'acpi-madt-table-p)))
     (when madt
       ;; Walk the ACPI MADT table looking for enabled CPUs.
@@ -1047,7 +1048,7 @@ This is a one-shot timer and must be reset after firing."
 (defun boot-secondary-cpus ()
   (detect-secondary-cpus)
   (dolist (cpu *cpus*)
-    (when (eql (cpu-state cpu) :offline)
+    (when (eql (x86-64-cpu-state cpu) :offline)
       (boot-cpu cpu))))
 
 (defun logical-core-count ()

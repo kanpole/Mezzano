@@ -229,7 +229,7 @@
   (setf (env:cross-symbol-value environment 'sys.int::*bsp-wired-stack*)
         (env:make-stack environment (* 128 1024)))
   (setf (env:cross-symbol-value environment 'mezzano.supervisor::*bsp-cpu*)
-        (env:make-structure environment 'mezzano.supervisor::cpu)))
+        (env:make-structure environment 'mezzano.supervisor::x86-64-cpu)))
 
 (defmethod post-serialize-image-for-target (image environment (target (eql :x86-64)))
   nil)

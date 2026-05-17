@@ -77,7 +77,7 @@
   (sys.lap-x86:cli)
   ;; Switch over to the wired stack.
   (sys.lap-x86:fs)
-  (sys.lap-x86:mov64 :rsp (:object-location nil #.+cpu-wired-stack-pointer+))
+  (sys.lap-x86:mov64 :rsp (:object-location nil #.+x86-64-cpu-wired-stack-pointer+))
   ;; Call function, argument were setup above.
   (sys.lap-x86:call (:object :rbx 0))
   (:gc :frame :multiple-values 0)
