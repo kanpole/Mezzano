@@ -830,7 +830,11 @@
            (assert (or (eql amount 0)
                        (eql amount 12)))
            (let ((imm-value (or (resolve-immediate rhs) 0)))
-             (assert (<= 0 imm-value 4095))
+             (assert (<= -4095 imm-value 4095))
+             ;; switch add/sub around for negative values
+             (when (minusp imm-value)
+               (setf imm-value (- imm-value))
+               (setf opc (logxor opc (ash opcode 30))))
              (emit-instruction (logior #x11000000
                                        opc
                                        (if (eql amount 12)
