@@ -547,10 +547,10 @@ Protected by the world stop lock."
   (mezzano.lap.arm64:msr :mdscr-el1 :x9)
   (mezzano.lap.arm64:isb)
   ;; Initialize cpu register - this is the only per-cpu context we get.
-  (mezzano.lap.arm64:ldr :x27 (:object :x0 5)) ; fixme: slot sp-el0
+  (mezzano.lap.arm64:ldr :x27 (:object-location :x0 #.+arm64-cpu-sp-el1+))
   (mezzano.lap.arm64:asr :x27 :x27 1) ; defixnum
   ;; Initialize thread register, start with the idle thread.
-  (mezzano.lap.arm64:ldr :x28 (:object :x0 3)) ; fixme: this is the idle-thread slot, stop hard coding it.
+  (mezzano.lap.arm64:ldr :x28 (:object-location :x0 #.+arm64-cpu-idle-thread+))
   ;; Clear everything except a few core registers
   (mezzano.lap.arm64:mov :x0 :xzr)
   (mezzano.lap.arm64:mov :x1 :xzr)
